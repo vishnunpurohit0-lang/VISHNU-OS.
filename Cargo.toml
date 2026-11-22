@@ -1,0 +1,25 @@
+[package]
+name = "vishnu-os"
+version = "0.11.0"
+edition = "2021"
+authors = ["Vishnu <vishnu@micro-os.local>"]
+description = "Vishnu OS - A secure, preemptive x86_64 UEFI Micro-OS written in Rust"
+license = "MIT OR Apache-2.0"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+opt-level = 1
+debug = true
+
+[[bin]]
+name = "vishnu-os"
+path = "src/main.rs"
+
+[lib]
+name = "vishnu_kernel"
+path = "src/lib.rs"
