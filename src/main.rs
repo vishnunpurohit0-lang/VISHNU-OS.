@@ -1,83 +1,315 @@
 use std::io::{self, BufRead, Write};
+use std::thread;
+use std::time::Duration;
+
 use vishnu_kernel::arch::x86_64::CpuFeatures;
 use vishnu_kernel::fs::RamFs;
 use vishnu_kernel::memory::{FrameAllocator, SimpleHeap};
 use vishnu_kernel::security::{get_security_status, TpmMeasurement};
-use vishnu_kernel::task::Scheduler;
+use vishnu_kernel::task::{Scheduler, TaskState};
 use vishnu_kernel::{KernelRingLog, KERNEL_NAME, KERNEL_VERSION};
 
-fn print_banner() {
-    println!("\x1b[1;36m");
-    println!("  ===============================================================");
-    println!("  *      __     ___     _                 ___  ____             *");
-    println!("  *      \\ \\   / (_)___| |__  _ __  _   _/ _ \\/ ___|            *");
-    println!("  *       \\ \\ / /| / __| '_ \\| '_ \\| | | | | | \\___ \\            *");
-    println!("  *        \\ V / | \\__ \\ | | | | | | |_| | |_| |___) |           *");
-    println!("  *         \\_/  |_|___/_| |_|_| |_|\\__,_|\\___/|____/            *");
-    println!("  *                                                             *");
-    println!("  *            Vishnu Micro-OS // Rust Kernel v0.11.0            *");
-    println!("  *             Target: x86_64 UEFI Secure Micro-Kernel          *");
-    println!("  ===============================================================");
+#[derive(Clone, Copy)]
+enum Theme {
+    NeonCyan,
+    MatrixGreen,
+    AmberRetro,
+    DeepPurple,
+}
+
+impl Theme {
+    fn primary(&self) -> &'static str {
+        match self {
+            Theme::NeonCyan => "\x1b[1;36m",
+            Theme::MatrixGreen => "\x1b[1;32m",
+            Theme::AmberRetro => "\x1b[1;33m",
+            Theme::DeepPurple => "\x1b[1;35m",
+        }
+    }
+
+    fn secondary(&self) -> &'static str {
+        match self {
+            Theme::NeonCyan => "\x1b[1;34m",
+            Theme::MatrixGreen => "\x1b[0;32m",
+            Theme::AmberRetro => "\x1b[0;33m",
+            Theme::DeepPurple => "\x1b[0;35m",
+        }
+    }
+
+    fn prompt_user(&self) -> &'static str {
+        match self {
+            Theme::NeonCyan => "\x1b[1;32m",
+            Theme::MatrixGreen => "\x1b[1;32m",
+            Theme::AmberRetro => "\x1b[1;33m",
+            Theme::DeepPurple => "\x1b[1;35m",
+        }
+    }
+}
+
+fn print_logo(theme: Theme) {
+    let p = theme.primary();
+    println!("{}", p);
+    println!(r#"  ==============================================================="#);
+    println!(r#"  *      __     ___     _                 ___  ____             *"#);
+    println!(r#"  *      \ \   / (_)___| |__  _ __  _   _/ _ \/ ___|            *"#);
+    println!(r#"  *       \ \ / /| / __| '_ \| '_ \| | | | | | \___ \            *"#);
+    println!(r#"  *        \ V / | \__ \ | | | | | | |_| | |_| |___) |           *"#);
+    println!(r#"  *         \_/  |_|___/_| |_|_| |_|\__,_|\___/|____/            *"#);
+    println!(r#"  *                                                             *"#);
+    println!(r#"  *             V I S H N U   M I C R O - O S                   *"#);
+    println!(r#"  *          x86_64 UEFI Preemptive Kernel v0.11.0               *"#);
+    println!(r#"  *        Engineered by Vishnu | Safe Bare-Metal Rust          *"#);
+    println!(r#"  ==============================================================="#);
     println!("\x1b[0m");
 }
 
-fn boot_sequence(log: &mut KernelRingLog, tpm: &mut TpmMeasurement) {
-    println!("\x1b[1;33m[*] Starting Vishnu OS Boot Sequence...\x1b[0m");
+fn boot_manager_menu(theme: Theme) {
+    println!("{}╔════════════════════════════════════════════════════════════════╗", theme.secondary());
+    println!("║             SURYAN / VISHNU BOOT MANAGER v2.4                  ║");
+    println!("╠════════════════════════════════════════════════════════════════╣");
+    println!("║  [>] 1. Boot Vishnu OS (Standard Preemptive Multitasking Kernel)║");
+    println!("║      2. Vishnu Recovery Console & Diagnostic Mode              ║");
+    println!("║      3. UEFI Firmware Shell (Pre-Boot Direct Input)            ║");
+    println!("║      4. Hardware Memory & TPM 2.0 PCR Integrity Audit          ║");
+    println!("║      5. ACPI Power Management & Hardware Reset                 ║");
+    println!("╚════════════════════════════════════════════════════════════════╝\x1b[0m");
+    println!("Default boot option [1] selected. Initializing kernel in 1 second...\n");
+    thread::sleep(Duration::from_millis(600));
+}
 
-    log.log("firmware-entry", "Watchdog disabled, calibrating TSC timer (3.20 GHz)");
-    println!(" [0.000100] [BOOT::firmware-entry  ] Watchdog disabled, TSC calibrated");
+fn boot_sequence(log: &mut KernelRingLog, tpm: &mut TpmMeasurement, theme: Theme) {
+    println!("{}--- [SYSTEM BOOT INITIALIZATION] ---{}\x1b[0m", theme.primary(), "\x1b[0m");
 
-    log.log("early-init", "GOP Framebuffer 1920x1080 32bpp initialized");
-    println!(" [0.002400] [BOOT::early-init      ] CPUID x86_64 verified, GOP Framebuffer ready");
+    let stages = [
+        ("firmware-entry", "Watchdog disabled, calibrating TSC timer (3.20 GHz)"),
+        ("early-init", "GOP Framebuffer 1920x1080 32bpp mapped, GDT/IDT initialized"),
+        ("platform-disc", "ACPI RSDP 2.0 verified, SMBIOS 3.3.0, SecureBoot=Enrolled"),
+        ("security-init", "TPM PCR[12] extended with cmdline, RDRAND entropy seeded"),
+        ("exit-boot-serv", "Firmware boot services exited, PCR[11] phase sealed"),
+        ("kernel-env", "W^X page tables enforced, CR0.WP=1, SMEP=1, SMAP=1"),
+        ("kernel-memory", "Physical frame allocator online (64 MB), 32 MB heap ready"),
+        ("kernel-tasks", "Round-robin preemptive scheduler active, spawning ring-0 tasks"),
+    ];
 
-    log.log("platform-discovery", "ACPI RSDP 2.0 verified, SecureBoot=Enrolled");
-    println!(" [0.005100] [BOOT::platform-disc   ] ACPI tables checked, Secure Boot verified");
+    for (i, (stage, desc)) in stages.iter().enumerate() {
+        let pct = (i + 1) * 100 / stages.len();
+        log.log(stage, desc);
+
+        let progress_bars = (pct / 5) as usize;
+        let bar: String = "█".repeat(progress_bars) + &"░".repeat(20 - progress_bars);
+
+        println!(" [0.00{:04}] [{}] [{:<16}] {}",
+            (i + 1) * 25,
+            format!("\x1b[1;32m{}\x1b[0m", bar),
+            stage,
+            desc
+        );
+        thread::sleep(Duration::from_millis(60));
+    }
 
     tpm.extend_pcr12("BOOT_IMAGE=vishnu.efi quiet mode=1920x1080");
-    log.log("security-init", "TPM PCR 12 extended with boot commandline");
-    println!(" [0.008900] [BOOT::security-init   ] Hardware entropy seeded, PCR 12 extended");
+    tpm.mark_phase("KERNEL_SHELL_READY");
 
-    tpm.mark_phase("EXIT_BOOT_SERVICES");
-    log.log("exit-boot-serv", "Firmware boot services exited, PCR 11 phase marked");
-    println!(" [0.012300] [BOOT::exit-boot-serv  ] PCR 11 sealed, firmware handoff complete");
+    println!("\x1b[1;32m\n[✓] Vishnu OS Kernel initialized successfully!\x1b[0m\n");
+}
 
-    log.log("kernel-env", "GDT/TSS loaded, W^X page tables enabled, CR0.WP=1");
-    println!(" [0.015000] [BOOT::kernel-env      ] Memory protection active (W^X, SMEP, SMAP)");
+fn show_fetch(theme: Theme, sched: &Scheduler, heap: &SimpleHeap, frames: &FrameAllocator) {
+    let p = theme.primary();
+    let s = theme.secondary();
+    let h_stats = heap.stats();
 
-    log.log("kernel-tasks", "Round-robin scheduler active, spawning shell task");
-    println!(" [0.025000] [BOOT::kernel-tasks    ] Preemptive multitasking initialized");
-    println!("\x1b[1;32m[✓] Boot Complete! Entering Vishnu OS Shell.\x1b[0m\n");
+    println!("{p}      __     ___     _                 ___  ____      {s}vishnu@kernel{p}");
+    println!("{p}      \\ \\   / (_)___| |__  _ __  _   _/ _ \\/ ___|     {s}-------------{p}");
+    println!("{p}       \\ \\ / /| / __| '_ \\| '_ \\| | | | | | \\___ \\     {s}OS: {p}Vishnu OS x86_64{p}");
+    println!("{p}        \\ V / | \\__ \\ | | | | | | |_| | |_| |___) |    {s}Kernel: {p}Rust no_std micro-kernel v0.11.0{p}");
+    println!("{p}         \\_/  |_|___/_| |_|_| |_|\\__,_|\\___/|____/     {s}Uptime: {p}{} ticks (~{:.1}s){p}",
+        sched.total_ticks(), sched.total_ticks() as f64 * 0.05);
+    println!("{p}                                                       {s}Shell: {p}vishnu-sh 1.2{p}");
+    println!("{p}                                                       {s}Resolution: {p}1920x1080 GOP Framebuffer{p}");
+    println!("{p}                                                       {s}Tasks: {p}{} active{p}",
+        sched.list_tasks().len());
+    println!("{p}                                                       {s}Memory: {p}{} KiB / {} KiB ({:.1}%){p}",
+        h_stats.used_bytes / 1024, h_stats.total_bytes / 1024,
+        (h_stats.used_bytes as f64 / h_stats.total_bytes as f64) * 100.0);
+    println!("{p}                                                       {s}Frames: {p}{}/16384 used{p}",
+        frames.allocated_frames());
+    println!("{p}                                                       {s}Security: {p}TPM 2.0 (PCR 11/12) + W^X{p}");
+    println!("\x1b[0m");
+}
+
+fn show_top(sched: &Scheduler, heap: &SimpleHeap, frames: &FrameAllocator) {
+    println!("\x1b[1;36m=== Vishnu OS Real-Time Task Monitor (top) ===\x1b[0m");
+    println!("Scheduler Ticks: {} | Context Switches: {}", sched.total_ticks(), sched.total_ticks() * 2);
+    let h_stats = heap.stats();
+    println!("Mem: {}K used, {}K free | Frames: {} allocated, {} free\n",
+        h_stats.used_bytes / 1024, h_stats.free_bytes / 1024,
+        frames.allocated_frames(), frames.free_frames());
+
+    println!("\x1b[1;37m{:<6} {:<16} {:<10} {:<6} {:<10} {:<12}\x1b[0m",
+        "PID", "COMMAND", "STATE", "PRIO", "MEM(KB)", "CPU_TICKS");
+    println!("------------------------------------------------------------------");
+    for t in sched.list_tasks() {
+        let state_col = match t.state {
+            TaskState::Running => "\x1b[1;32mRUNNING   \x1b[0m",
+            TaskState::Ready => "\x1b[1;34mREADY     \x1b[0m",
+            TaskState::Sleeping => "\x1b[0;33mSLEEPING  \x1b[0m",
+            TaskState::Terminated => "\x1b[0;31mTERMINATED\x1b[0m",
+        };
+        println!("{:<6} {:<16} {} {:<6} {:<10} {:<12}",
+            t.id, t.name, state_col, t.priority, t.memory_used_kb, t.cpu_ticks);
+    }
+}
+
+fn run_matrix_effect() {
+    println!("\x1b[1;32m[Entering Matrix stream - press any key simulation]\x1b[0m");
+    let streams = [
+        "0 1 1 0 1 0 0 1 0 1 1 1 0 1 0 1 0 0 1 1",
+        "V I S H N U - O S - K E R N E L - R U S T",
+        "1 0 0 1 0 1 1 0 1 0 0 1 0 1 1 0 1 1 0 1",
+        "W ^ X   P A G I N G   A C T I V E   O K ",
+        "0 0 1 1 0 1 0 1 0 1 1 0 1 0 0 1 0 1 1 0",
+        "T P M   P C R 1 2   M E A S U R E D     ",
+    ];
+    for s in streams.iter().cycle().take(12) {
+        println!("\x1b[0;32m    {}    {}\x1b[0m", s, s);
+        thread::sleep(Duration::from_millis(50));
+    }
+    println!("\x1b[1;32m[Matrix stream paused]\x1b[0m\n");
+}
+
+fn run_calc(expr: &[&str]) {
+    if expr.is_empty() {
+        println!("Usage: calc <number> <+|-|*|/> <number>");
+        return;
+    }
+    if expr.len() == 3 {
+        let n1: Result<f64, _> = expr[0].parse();
+        let op = expr[1];
+        let n2: Result<f64, _> = expr[2].parse();
+
+        if let (Ok(a), Ok(b)) = (n1, n2) {
+            match op {
+                "+" => println!("= {}", a + b),
+                "-" => println!("= {}", a - b),
+                "*" | "x" => println!("= {}", a * b),
+                "/" => {
+                    if b == 0.0 {
+                        println!("Error: Division by zero");
+                    } else {
+                        println!("= {}", a / b);
+                    }
+                }
+                _ => println!("Unknown operator '{}'. Use +, -, *, /", op),
+            }
+            return;
+        }
+    }
+    println!("Usage: calc <number> <operator> <number> (e.g. calc 1024 * 64)");
+}
+
+fn run_text_editor(fs: &mut RamFs, file_path: &str, reader: &mut impl BufRead) {
+    let target = fs.resolve_path(file_path);
+    let mut buffer: Vec<String> = if let Some(content) = fs.read_file(&target) {
+        content.lines().map(|s| s.to_string()).collect()
+    } else {
+        Vec::new()
+    };
+
+    println!("\x1b[1;33m--- Vishnu OS Text Editor (nano-lite) ---\x1b[0m");
+    println!("Editing file: \x1b[1;36m{}\x1b[0m", target);
+    println!("Commands: \x1b[1;32m:w\x1b[0m (save), \x1b[1;32m:q\x1b[0m (quit), \x1b[1;32m:wq\x1b[0m (save & quit), \x1b[1;32m:d <line#>\x1b[0m (delete line)\n");
+
+    loop {
+        // Display file content with line numbers
+        if buffer.is_empty() {
+            println!("  \x1b[0;90m[Empty file. Type lines to add content.]\x1b[0m");
+        } else {
+            for (idx, line) in buffer.iter().enumerate() {
+                println!("{:>3} | {}", idx + 1, line);
+            }
+        }
+
+        print!("\x1b[1;32medit>\x1b[0m ");
+        io::stdout().flush().unwrap();
+
+        let mut input = String::new();
+        if reader.read_line(&mut input).unwrap_or(0) == 0 {
+            break;
+        }
+
+        let line_trimmed = input.trim_end();
+        if line_trimmed == ":q" {
+            println!("Exited without saving.");
+            break;
+        } else if line_trimmed == ":w" {
+            let content = buffer.join("\n") + "\n";
+            fs.write_file(&target, &content);
+            println!("Saved {} bytes to {}", content.len(), target);
+        } else if line_trimmed == ":wq" {
+            let content = buffer.join("\n") + "\n";
+            fs.write_file(&target, &content);
+            println!("Saved {} bytes to {}. Exited editor.", content.len(), target);
+            break;
+        } else if line_trimmed.starts_with(":d ") {
+            let line_num: Result<usize, _> = line_trimmed[3..].trim().parse();
+            if let Ok(num) = line_num {
+                if num >= 1 && num <= buffer.len() {
+                    buffer.remove(num - 1);
+                    println!("Line {} deleted.", num);
+                } else {
+                    println!("Invalid line number.");
+                }
+            }
+        } else {
+            buffer.push(line_trimmed.to_string());
+        }
+    }
 }
 
 fn print_help() {
-    println!("\x1b[1;34m--- Vishnu OS Commands ---\x1b[0m");
-    println!("  help                 - Display available commands");
-    println!("  uname / version      - Show OS and kernel information");
-    println!("  uptime               - Show system ticks and uptime");
-    println!("  cpuinfo              - Inspect CPU features and security flags");
-    println!("  meminfo / df         - Frame allocator and heap memory statistics");
-    println!("  security / tpm       - View TPM PCR measurements and protection state");
-    println!("  ps / tasks           - List running scheduler tasks");
-    println!("  spawn <name>         - Spawn a worker task to test preemption");
-    println!("  counters             - Show scheduler preemption tick counters");
-    println!("  ls [path]            - List directory contents");
-    println!("  tree [path]          - Recursive directory tree view");
+    println!("\x1b[1;36m===============================================================");
+    println!("                 VISHNU OS COMMAND REFERENCE                   ");
+    println!("===============================================================\x1b[0m");
+    println!("\x1b[1;33m[System & Diagnostics]\x1b[0m");
+    println!("  fetch / neofetch     - Show ASCII system insignia and status dashboard");
+    println!("  top / htop           - Interactive real-time task manager");
+    println!("  uname / version      - Display kernel architecture & version");
+    println!("  uptime               - Show scheduler ticks and clock metrics");
+    println!("  cpuinfo              - Inspect x86_64 security extensions (SMEP/SMAP/NX)");
+    println!("  meminfo / df         - Frame allocator and virtual heap statistics");
+    println!("  security / tpm       - View TPM 2.0 PCR[11]/PCR[12] & SecureBoot status");
+    println!("  log                  - Print kernel ring buffer boot log");
+    println!();
+    println!("\x1b[1;33m[Process & Multitasking]\x1b[0m");
+    println!("  ps / tasks           - List all active task control blocks");
+    println!("  spawn <name>         - Spawn a worker task to test preemptive scheduling");
+    println!("  counters             - Show per-task preemption ticks");
+    println!("  run <prog>           - Run isolated Ring-3 program (hello, fault, gp, denied)");
+    println!();
+    println!("\x1b[1;33m[File Management (RamFS)]\x1b[0m");
+    println!("  ls [path]            - List folder contents");
+    println!("  tree [path]          - Recursive visual directory tree");
     println!("  cd <path>            - Change directory");
     println!("  pwd                  - Print current working directory");
-    println!("  cat <file>           - Display file contents");
-    println!("  write <file> <text>  - Create or overwrite a file");
-    println!("  append <file> <text> - Append text to an existing file");
-    println!("  mkdir <path>         - Create a directory");
-    println!("  rm <path>            - Remove a file or folder");
-    println!("  run <prog>           - Execute isolated ring-3 user program");
-    println!("  wifi [scan|status]   - Inspect Wi-Fi host bridge status");
-    println!("  log                  - Display kernel boot ring log");
+    println!("  cat <file>           - Display text file");
+    println!("  write <file> <text>  - Write line to file");
+    println!("  append <file> <text> - Append text to file");
+    println!("  edit <file>          - Launch interactive nano-lite text editor");
+    println!("  mkdir <path>         - Create directory");
+    println!("  rm <path>            - Delete file or folder");
+    println!();
+    println!("\x1b[1;33m[Utilities & Customization]\x1b[0m");
+    println!("  calc <a +|-|*|/ b>   - Arithmetic expression evaluator");
+    println!("  theme <cyan|green|amber|purple> - Change OS terminal UI theme");
+    println!("  matrix               - Digital falling code visualizer");
+    println!("  wifi [scan|status]   - Wi-Fi bridge adapter interface");
     println!("  clear / cls          - Clear screen");
-    println!("  reboot / exit        - Shut down Vishnu OS session");
+    println!("  reboot / exit        - Gracefully shutdown Vishnu OS");
 }
 
 fn main() {
-    print_banner();
+    let mut theme = Theme::NeonCyan;
+    print_logo(theme);
 
     let mut log = KernelRingLog::new();
     let mut tpm = TpmMeasurement::new();
@@ -87,36 +319,42 @@ fn main() {
     let mut fs = RamFs::new();
     let cpu = CpuFeatures::probe();
 
-    // Allocate initial kernel frames and heap
+    // Allocate initial kernel frames and heap blocks
     for _ in 0..128 {
         frames.alloc_frame();
     }
     heap.allocate(512 * 1024);
 
-    boot_sequence(&mut log, &mut tpm);
+    boot_manager_menu(theme);
+    boot_sequence(&mut log, &mut tpm, theme);
 
-    // If executed with non-interactive flag
+    // Automated non-interactive check
     let args: Vec<String> = std::env::args().collect();
     if args.contains(&"--test-boot".to_string()) {
-        println!("Test boot successful. Exiting clean.");
+        println!("Test boot successful. Vishnu OS ready.");
         return;
     }
 
     let stdin = io::stdin();
     let mut reader = stdin.lock();
 
-    println!("Type \x1b[1;33mhelp\x1b[0m to explore commands, or \x1b[1;33mexit\x1b[0m to quit.\n");
+    show_fetch(theme, &scheduler, &heap, &frames);
+    println!("Type \x1b[1;33mhelp\x1b[0m for commands, \x1b[1;33mtop\x1b[0m for process monitor, or \x1b[1;33mexit\x1b[0m to quit.\n");
 
     loop {
-        // Advance scheduler tick
+        // Scheduler ticks on each loop cycle
         scheduler.tick();
 
-        print!("\x1b[1;32mvishnu@kernel\x1b[0m:\x1b[1;34m{}\x1b[0m# ", fs.current_path());
+        print!("{p}vishnu\x1b[0m@{p}kernel\x1b[0m:{s}{path}\x1b[0m# ",
+            p = theme.prompt_user(),
+            s = theme.secondary(),
+            path = fs.current_path()
+        );
         io::stdout().flush().unwrap();
 
         let mut line = String::new();
         if reader.read_line(&mut line).unwrap_or(0) == 0 {
-            break; // EOF
+            break;
         }
 
         let trimmed = line.trim();
@@ -129,6 +367,42 @@ fn main() {
 
         match cmd {
             "help" => print_help(),
+            "fetch" | "neofetch" => show_fetch(theme, &scheduler, &heap, &frames),
+            "top" | "htop" => show_top(&scheduler, &heap, &frames),
+            "matrix" => run_matrix_effect(),
+            "calc" => run_calc(&parts[1..]),
+            "edit" | "nano" => {
+                if parts.len() < 2 {
+                    println!("Usage: edit <filename>");
+                } else {
+                    run_text_editor(&mut fs, parts[1], &mut reader);
+                }
+            }
+            "theme" => {
+                if parts.len() > 1 {
+                    match parts[1] {
+                        "cyan" | "neon" => {
+                            theme = Theme::NeonCyan;
+                            println!("Theme switched to Neon Cyan.");
+                        }
+                        "green" | "matrix" => {
+                            theme = Theme::MatrixGreen;
+                            println!("Theme switched to Matrix Green.");
+                        }
+                        "amber" | "retro" => {
+                            theme = Theme::AmberRetro;
+                            println!("Theme switched to Amber Retro.");
+                        }
+                        "purple" => {
+                            theme = Theme::DeepPurple;
+                            println!("Theme switched to Deep Purple.");
+                        }
+                        _ => println!("Unknown theme. Choose: cyan, green, amber, purple"),
+                    }
+                } else {
+                    println!("Usage: theme <cyan|green|amber|purple>");
+                }
+            }
             "clear" | "cls" => {
                 print!("\x1b[2J\x1b[1;1H");
                 io::stdout().flush().unwrap();
@@ -196,7 +470,7 @@ fn main() {
                 if let Some(entries) = fs.list_dir(&target) {
                     for (name, is_dir, size) in entries {
                         if is_dir {
-                            println!("\x1b[1;34m{}/\x1b[0m", name);
+                            println!("{}{}/ \x1b[0m", theme.secondary(), name);
                         } else {
                             println!("{:<20} {} B", name, size);
                         }
@@ -211,7 +485,7 @@ fn main() {
                 } else {
                     fs.current_path().to_string()
                 };
-                print_tree(&fs, &target, 0);
+                print_tree(&fs, &target, 0, theme);
             }
             "cat" => {
                 if parts.len() < 2 {
@@ -328,18 +602,18 @@ fn main() {
     }
 }
 
-fn print_tree(fs: &RamFs, path: &str, depth: usize) {
+fn print_tree(fs: &RamFs, path: &str, depth: usize, theme: Theme) {
     if let Some(entries) = fs.list_dir(path) {
         for (name, is_dir, _) in entries {
             let indent = "  ".repeat(depth);
             if is_dir {
-                println!("{}|-- \x1b[1;34m{}/\x1b[0m", indent, name);
+                println!("{}|-- {}{}/\x1b[0m", indent, theme.secondary(), name);
                 let subpath = if path == "/" {
                     format!("/{}", name)
                 } else {
                     format!("{}/{}", path, name)
                 };
-                print_tree(fs, &subpath, depth + 1);
+                print_tree(fs, &subpath, depth + 1, theme);
             } else {
                 println!("{}|-- {}", indent, name);
             }

@@ -17,7 +17,7 @@ opt-level = 1
 debug = true
 
 [[bin]]
-name = "vishnu-os"
+name = "vishnu"
 path = "src/main.rs"
 
 [lib]
