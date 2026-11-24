@@ -396,17 +396,15 @@ def build_iso(fat_image: bytes, extra_files: dict[str, bytes], output_path: str)
     # --- Sector 19: El Torito Boot Catalog ------------------------------------
     catalog = bytearray(ISO_SECTOR)
 
-    # Validation entry (32 bytes)
+    # 1. Validation entry (32 bytes)
     validation = bytearray(32)
-    validation[0] = 1   # header ID
-    validation[1] = 0xEF  # platform: EFI
-    validation[2:4] = b'\x00\x00'  # reserved
-    validation[4:28] = b'Vishnu OS EFI Boot'.ljust(24, b'\x00')
-    # Checksum: sum of all 16-bit words in this entry must be 0
-    validation[28:30] = b'\x00\x00'  # checksum placeholder
+    validation[0] = 1   # Header ID
+    validation[1] = 0x00  # Platform: 80x86 (standard x86 BIOS / UEFI)
+    validation[2:4] = b'\x00\x00'  # Reserved
+    validation[4:28] = b'Vishnu OS Boot Catalog'.ljust(24, b'\x00')
     validation[30] = 0x55
     validation[31] = 0xAA
-    # Calculate checksum
+    # Checksum: sum of all 16-bit words in this entry must be 0
     total = 0
     for i in range(0, 32, 2):
         total += struct.unpack_from('<H', validation, i)[0]
@@ -414,18 +412,32 @@ def build_iso(fat_image: bytes, extra_files: dict[str, bytes], output_path: str)
     struct.pack_into('<H', validation, 28, checksum)
     catalog[0:32] = validation
 
-    # Initial/Default Entry — EFI boot image (32 bytes)
+    # 2. Initial / Default Entry — BIOS entry (32 bytes)
+    # Non-bootable for legacy BIOS, pointing to EFI image
     initial = bytearray(32)
-    initial[0] = 0x88  # bootable
-    initial[1] = 0xEF  # EFI media type
-    struct.pack_into('<H', initial, 2, 0)  # load segment
-    initial[4] = 0     # system type
-    initial[5] = 0     # unused
-    # Sector count (in 512-byte virtual sectors)
-    efi_virt_sectors = (len(fat_image) + 511) // 512
-    struct.pack_into('<H', initial, 6, efi_virt_sectors if efi_virt_sectors < 65535 else 0)
-    struct.pack_into('<I', initial, 8, efi_image_lba)
+    initial[0] = 0x00  # Not bootable by legacy BIOS
+    initial[1] = 0x00  # No emulation
     catalog[32:64] = initial
+
+    # 3. Section Header for EFI (32 bytes)
+    sec_hdr = bytearray(32)
+    sec_hdr[0] = 0x91  # Section header, final section
+    sec_hdr[1] = 0xEF  # Platform ID: EFI
+    struct.pack_into('<H', sec_hdr, 2, 1)  # 1 section entry following
+    sec_hdr[4:32] = b'EFI System Partition'.ljust(28, b'\x00')
+    catalog[64:96] = sec_hdr
+
+    # 4. Section Entry for EFI (32 bytes)
+    sec_entry = bytearray(32)
+    sec_entry[0] = 0x88  # Bootable
+    sec_entry[1] = 0x00  # Media type: No emulation
+    struct.pack_into('<H', sec_entry, 2, 0)  # Load segment
+    sec_entry[4] = 0     # System type
+    sec_entry[5] = 0     # Unused
+    efi_virt_sectors = (len(fat_image) + 511) // 512
+    struct.pack_into('<H', sec_entry, 6, efi_virt_sectors if efi_virt_sectors < 65535 else 0)
+    struct.pack_into('<I', sec_entry, 8, efi_image_lba)
+    catalog[96:128] = sec_entry
 
     iso.extend(catalog)
 
@@ -531,7 +543,10 @@ def main():
         print(f"    vishnu.cfg   : {len(vishnu_cfg):,} bytes")
 
     # 2. Build the FAT EFI System Partition image
-    fat_files = {'EFI/BOOT/BOOTX64.EFI': boot_efi}
+    fat_files = {
+        'EFI/BOOT/BOOTX64.EFI': boot_efi,
+        'STARTUP.NSH': b'\\EFI\\BOOT\\BOOTX64.EFI\r\n',
+    }
     if vishnu_cfg:
         fat_files['EFI/BOOT/VISHNU.CFG'] = vishnu_cfg
 
